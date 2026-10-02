@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#170f25">
+  <title>{% block title %}NEWDS · Your quiet vault{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+  <script>tailwind.config={theme:{extend:{colors:{ink:'#170f25',plum:'#251632',violet:'#a78bfa',rose:'#e8b4a5',gold:'#d5ad83'},fontFamily:{sans:['DM Sans','sans-serif'],serif:['Playfair Display','serif']}}}}</script>
+  <style>
+    :root{color-scheme:dark}body{background:radial-gradient(ellipse at 12% 8%,#392348 0,transparent 34%),radial-gradient(ellipse at 88% 25%,#342039 0,transparent 30%),#170f25;color:#f6edf6;overflow-x:hidden}
+    .glass{background:linear-gradient(145deg,rgba(255,255,255,.075),rgba(255,255,255,.025));border:1px solid rgba(232,180,165,.16);box-shadow:0 24px 80px rgba(0,0,0,.23);backdrop-filter:blur(18px)}
+    .gold-text{background:linear-gradient(110deg,#f1d8bf,#dfae9f 48%,#c7a7ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .field{width:100%;border-radius:14px;background:rgba(15,10,24,.58);border:1px solid rgba(255,255,255,.11);padding:13px 15px;color:#fff;outline:none;transition:.2s}
+    .field:focus{border-color:#d5ad83;box-shadow:0 0 0 3px rgba(213,173,131,.12)}
+    .btn-primary{background:linear-gradient(110deg,#d3a88b,#b99ae8);color:#20152a;transition:transform .2s,filter .2s}.btn-primary:hover{transform:translateY(-2px);filter:brightness(1.08)}
+    .page-in{animation:enter .48s cubic-bezier(.2,.8,.2,1) both}@keyframes enter{from{opacity:0;transform:translateX(22px)}to{opacity:1;transform:translateX(0)}}
+    .note-card{position:relative;isolation:isolate;overflow:hidden;background:linear-gradient(145deg,rgba(255,255,255,.09),rgba(255,255,255,.025));border:1px solid rgba(255,255,255,.105);box-shadow:0 14px 42px rgba(0,0,0,.18);transition:transform .35s cubic-bezier(.2,.8,.2,1),border-color .3s,box-shadow .35s}
+    .note-card:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:linear-gradient(#e8b4a5,#b99ae8);opacity:.62;transition:width .3s,opacity .3s;z-index:-1}
+    .note-card:hover{transform:translateY(-6px) rotate(-.35deg);border-color:rgba(232,180,165,.4);box-shadow:0 24px 60px rgba(0,0,0,.3),0 0 35px rgba(185,154,232,.08)}.note-card:hover:before{width:100%;opacity:.08}
+    .editor-surface{animation:editor-arrive .82s cubic-bezier(.16,1,.3,1) both;transform-origin:left center}@keyframes editor-arrive{0%{opacity:.2;transform:translateX(-105%) scale(.96);clip-path:inset(0 0 0 100%);filter:blur(8px)}55%{opacity:1;clip-path:inset(0 0 0 0);filter:blur(0)}100%{transform:translateX(0) scale(1);clip-path:inset(0 0 0 0)}}
+    body.wipe-out:after{content:"";position:fixed;z-index:100;inset:0;background:linear-gradient(110deg,#d8ae9b,#bca2e8 58%,#21152e);transform-origin:left;animation:wipe-cover .38s cubic-bezier(.7,0,.2,1) forwards}@keyframes wipe-cover{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+    .editor-toolbar{animation:toolbar-pop .55s .25s both cubic-bezier(.16,1,.3,1)}@keyframes toolbar-pop{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+    .float-orb{animation:float 8s ease-in-out infinite}@keyframes float{0%,100%{transform:translateY(0) rotate(0)}50%{transform:translateY(-13px) rotate(5deg)}}
+    .mood-lavender{background:linear-gradient(145deg,rgba(167,139,250,.14),rgba(255,255,255,.025))}.mood-rose{background:linear-gradient(145deg,rgba(232,180,165,.17),rgba(255,255,255,.025))}.mood-midnight{background:linear-gradient(145deg,rgba(65,81,145,.22),rgba(255,255,255,.025))}.mood-paper{background:linear-gradient(145deg,rgba(205,177,136,.17),rgba(255,255,255,.025))}
+    .focus-mode header,.focus-mode .editor-toolbar,.focus-mode .editor-help{opacity:.12;transition:opacity .35s}.focus-mode header:hover,.focus-mode .editor-toolbar:hover{opacity:1}.focus-mode main{max-width:100%;padding-left:2rem;padding-right:2rem}.focus-mode .editor-surface{max-width:1100px}
+    .unlock-reveal{animation:unlock .9s cubic-bezier(.16,1,.3,1) both}@keyframes unlock{0%{opacity:0;transform:translateY(22px) scale(.97);filter:blur(12px);clip-path:inset(0 0 100% 0)}55%{opacity:1;filter:blur(0);clip-path:inset(0)}100%{transform:translateY(0) scale(1);clip-path:inset(0)}}
+    .lightbox{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(8,5,14,.92);backdrop-filter:blur(16px);animation:fade-in .25s both}.lightbox img{max-width:92vw;max-height:88vh;object-fit:contain;border-radius:18px;box-shadow:0 24px 100px #000}.lightbox-close{position:absolute;right:24px;top:22px;font-size:28px;color:#fff}
+    .ambient-on:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:1;background:radial-gradient(ellipse at 50% 100%,rgba(191,148,202,.08),transparent 55%);animation:ambient 7s ease-in-out infinite alternate}@keyframes ambient{from{opacity:.45}to{opacity:1}}@keyframes fade-in{from{opacity:0}to{opacity:1}}
+    .stagger-in>*{animation:card-in .65s both cubic-bezier(.16,1,.3,1)}.stagger-in>*:nth-child(2){animation-delay:.06s}.stagger-in>*:nth-child(3){animation-delay:.12s}.stagger-in>*:nth-child(4){animation-delay:.18s}.stagger-in>*:nth-child(5){animation-delay:.24s}.stagger-in>*:nth-child(6){animation-delay:.3s}@keyframes card-in{from{opacity:0;transform:translateY(20px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+  </style>
+</head>
+<body class="min-h-screen font-sans antialiased">
+  <header class="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 md:px-10">
+    <a href="{{ url_for('dashboard') if username else url_for('login') }}" class="flex items-center gap-3"><span class="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-rose to-violet text-lg font-bold text-ink shadow-lg">N</span><span><span class="block font-serif text-xl tracking-wide">NEWDS</span><span class="block text-[10px] uppercase tracking-[.28em] text-white/45">your quiet vault</span></span></a>
+    {% if username %}<div class="flex items-center gap-3"><span class="hidden text-sm text-white/60 sm:inline">Halo, {{ username }}</span><form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="rounded-full border border-white/10 px-4 py-2 text-sm text-white/70 hover:border-rose/50 hover:text-white">Keluar</button></form></div>{% endif %}
+  </header>
+  <main class="page-in mx-auto max-w-7xl px-5 pb-16 md:px-10">{% with messages=get_flashed_messages(with_categories=true) %}{% if messages %}<div class="mb-5 space-y-2">{% for category,message in messages %}<div class="rounded-xl border px-4 py-3 text-sm {{ 'border-emerald-300/20 bg-emerald-400/10 text-emerald-100' if category=='success' else 'border-rose-300/20 bg-rose-400/10 text-rose-100' }}">{{ message }}</div>{% endfor %}</div>{% endif %}{% endwith %}{% block content %}{% endblock %}</main>
+  <script>
+    // Reveal the editor as a full-screen left-to-right page wipe on navigation.
+    document.querySelectorAll('[data-editor-link]').forEach(link=>link.addEventListener('click',e=>{if(e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();const href=link.href;document.body.classList.add('wipe-out');setTimeout(()=>location.href=href,340)}));
+    document.querySelectorAll('[data-swipe]').forEach(el=>{let x=0;el.addEventListener('touchstart',e=>x=e.changedTouches[0].screenX,{passive:true});el.addEventListener('touchend',e=>{if(x-e.changedTouches[0].screenX>70){el.classList.add('opacity-0','-translate-x-8');setTimeout(()=>el.classList.remove('opacity-0','-translate-x-8'),280)}},{passive:true})});
+    document.querySelectorAll('[data-file-input]').forEach(input=>input.addEventListener('change',()=>{const target=document.querySelector(input.dataset.fileInput);if(target)target.textContent=[...input.files].map(f=>f.name).join(' · ')||'Belum ada lampiran dipilih'}));
+    document.querySelectorAll('[data-swipe]').forEach(el=>{let x=0;el.addEventListener('touchstart',e=>x=e.changedTouches[0].screenX,{passive:true});el.addEventListener('touchend',e=>{if(x-e.changedTouches[0].screenX>70){el.style.transform='translateX(-14px)';el.style.opacity='.75';setTimeout(()=>{el.style.transform='';el.style.opacity=''},260)}},{passive:true})});
+    if(localStorage.getItem('newds-ambient')==='on'){document.body.classList.add('ambient-on');document.querySelectorAll('[data-ambient]').forEach(b=>b.setAttribute('aria-pressed','true'))}
+    document.querySelectorAll('[data-ambient]').forEach(b=>b.addEventListener('click',()=>{const enabled=document.body.classList.toggle('ambient-on');localStorage.setItem('newds-ambient',enabled?'on':'off');b.setAttribute('aria-pressed',enabled?'true':'false');b.classList.toggle('text-gold',enabled)}));
+    document.querySelectorAll('[data-lightbox]').forEach(img=>img.addEventListener('click',e=>{e.preventDefault();const box=document.createElement('div');box.className='lightbox';box.innerHTML='<button class="lightbox-close" aria-label="Tutup">×</button><img alt="Preview">';box.querySelector('img').src=img.src;box.addEventListener('click',()=>box.remove());document.body.appendChild(box)}));
+    document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelector('.lightbox')?.remove();document.body.classList.remove('focus-mode')}});
+    const reorderForm=document.querySelector('[data-reorder-form]');if(reorderForm){let dragged=null;document.querySelectorAll('[data-note-id]').forEach(card=>{card.draggable=true;card.addEventListener('dragstart',()=>{dragged=card;card.classList.add('opacity-40')});card.addEventListener('dragend',()=>{card.classList.remove('opacity-40');dragged=null;persistOrder()});card.addEventListener('dragover',e=>{e.preventDefault();if(dragged&&dragged!==card){const rect=card.getBoundingClientRect();card.parentNode.insertBefore(dragged,e.clientY<rect.top+rect.height/2?card:card.nextSibling)}})});function persistOrder(){const data=new FormData(reorderForm);document.querySelectorAll('[data-note-id]').forEach(el=>data.append('note_ids[]',el.dataset.noteId));fetch(reorderForm.action,{method:'POST',body:data})}}
+  </script>
+</body></html>
