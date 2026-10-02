@@ -4,6 +4,9 @@ import re
 import secrets
 import sqlite3
 import uuid
+from html.parser import HTMLParser
+from html import escape
+from urllib.parse import urlparse
 from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -54,7 +57,7 @@ def init_db():
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', encrypted INTEGER NOT NULL DEFAULT 0,
           salt TEXT, reminder_date TEXT, mood TEXT NOT NULL DEFAULT 'lavender', pinned INTEGER NOT NULL DEFAULT 0,
-          sort_order INTEGER NOT NULL DEFAULT 0, daily_date TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+           sort_order INTEGER NOT NULL DEFAULT 0, daily_date TEXT, deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS attachments (
           id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -68,10 +71,25 @@ def init_db():
           milestone INTEGER NOT NULL, delivered_at TEXT NOT NULL, PRIMARY KEY(note_id, milestone)
         );
         CREATE INDEX IF NOT EXISTS notes_owner_updated ON notes(user_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS tags (
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL, normalized_name TEXT NOT NULL, UNIQUE(user_id, normalized_name)
+        );
+        CREATE TABLE IF NOT EXISTS note_tags (
+          note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+          tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+          PRIMARY KEY(note_id, tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS tags_owner_name ON tags(user_id, normalized_name);
+        CREATE TABLE IF NOT EXISTS user_settings (
+          user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          reduced_motion INTEGER NOT NULL DEFAULT 0, ambient INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
         """)
         # Lightweight migration for databases created by previous NEWDS builds.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(notes)")}
-        for name, definition in (("mood", "TEXT NOT NULL DEFAULT 'lavender'"), ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("sort_order", "INTEGER NOT NULL DEFAULT 0"), ("daily_date", "TEXT")):
+        for name, definition in (("mood", "TEXT NOT NULL DEFAULT 'lavender'"), ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("sort_order", "INTEGER NOT NULL DEFAULT 0"), ("daily_date", "TEXT"), ("deleted_at", "TEXT")):
             if name not in columns:
                 db.execute(f"ALTER TABLE notes ADD COLUMN {name} {definition}")
 
@@ -81,6 +99,67 @@ init_db()
 
 def now_text():
     return datetime.now().isoformat(timespec="seconds")
+
+
+RICH_TAGS = {"p", "br", "strong", "b", "em", "i", "u", "s", "mark", "h2", "h3", "blockquote", "ul", "ol", "li", "pre", "code", "hr", "a", "input"}
+RICH_ATTRS = {"a": {"href", "target", "rel"}, "input": {"type", "checked", "disabled"}}
+
+
+class RichHTMLSanitizer(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag not in RICH_TAGS:
+            return
+        safe = []
+        for key, value in attrs:
+            key = key.lower()
+            if key not in RICH_ATTRS.get(tag, set()):
+                continue
+            if tag == "a" and key == "href":
+                parsed = urlparse(value or "")
+                if parsed.scheme not in {"http", "https", "mailto"}:
+                    continue
+            if tag == "input" and key in {"checked", "disabled"}:
+                safe.append(key)
+            elif value is not None:
+                safe.append(f'{key}="{escape(value, quote=True)}"')
+        self.out.append("<" + tag + (" " + " ".join(safe) if safe else "") + ">")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag.lower() in RICH_TAGS and tag.lower() not in {"br", "hr", "input"}:
+            self.out.append(f"</{tag.lower()}>")
+
+    def handle_data(self, data):
+        self.out.append(escape(data))
+
+
+def sanitize_rich_html(value):
+    parser = RichHTMLSanitizer()
+    parser.feed(value or "")
+    return "".join(parser.out).strip()
+
+
+def rich_text(value):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value or "")).strip()
+
+
+def display_rich_html(value):
+    value = value or ""
+    if "<" not in value:
+        return "".join(f"<p>{escape(line)}</p>" for line in value.splitlines() if line.strip()) or "<p></p>"
+    return sanitize_rich_html(value)
+
+
+@app.template_filter("plain_preview")
+def plain_preview(value):
+    return rich_text(value)[:180]
 
 
 def login_required(fn):
@@ -93,7 +172,7 @@ def login_required(fn):
 
 
 def user_note(note_id):
-    note = connect_db().execute("SELECT * FROM notes WHERE id=? AND user_id=?", (note_id, session["user_id"])).fetchone()
+    note = connect_db().execute("SELECT * FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL", (note_id, session["user_id"])).fetchone()
     if note is None:
         abort(404)
     return note
@@ -130,10 +209,39 @@ def attachment_rows(note_id):
     return connect_db().execute("SELECT * FROM attachments WHERE note_id=? AND user_id=? ORDER BY id", (note_id, session["user_id"])).fetchall()
 
 
+def note_tags(note_id):
+    return connect_db().execute("SELECT t.* FROM tags t JOIN note_tags nt ON nt.tag_id=t.id WHERE nt.note_id=? AND t.user_id=? ORDER BY t.name", (note_id, session["user_id"])).fetchall()
+
+
+def parse_search(raw):
+    terms, filters = [], {}
+    for token in raw.split():
+        if ":" in token:
+            key, value = token.split(":", 1)
+            if key in {"is", "mood", "before", "after", "tag"} and value:
+                filters.setdefault(key, []).append(value.lower())
+                continue
+        terms.append(token)
+    return " ".join(terms), filters
+
+
+def sync_tags(db, note_id, raw_tags):
+    names = []
+    for value in raw_tags.replace(",", " ").split():
+        clean = re.sub(r"[^\w-]", "", value.strip().lower())[:32]
+        if clean and clean not in names:
+            names.append(clean)
+    db.execute("DELETE FROM note_tags WHERE note_id=?", (note_id,))
+    for name in names[:12]:
+        db.execute("INSERT OR IGNORE INTO tags(user_id,name,normalized_name) VALUES(?,?,?)", (session["user_id"], name, name))
+        tag = db.execute("SELECT id FROM tags WHERE user_id=? AND normalized_name=?", (session["user_id"], name)).fetchone()
+        db.execute("INSERT OR IGNORE INTO note_tags(note_id,tag_id) VALUES(?,?)", (note_id, tag["id"]))
+
+
 def reminders_for_login(user_id):
     today = date.today()
     db = connect_db()
-    notes = db.execute("SELECT id,title,reminder_date FROM notes WHERE user_id=? AND reminder_date IS NOT NULL", (user_id,)).fetchall()
+    notes = db.execute("SELECT id,title,reminder_date FROM notes WHERE user_id=? AND deleted_at IS NULL AND reminder_date IS NOT NULL", (user_id,)).fetchall()
     notices = []
     for note in notes:
         try:
@@ -217,20 +325,38 @@ def logout():
 def dashboard():
     db = connect_db()
     query = request.args.get("q", "").strip()
-    if query:
-        notes = db.execute("SELECT * FROM notes WHERE user_id=? AND (title LIKE ? OR (encrypted=0 AND body LIKE ?)) ORDER BY pinned DESC, sort_order, updated_at DESC",
-                           (session["user_id"], f"%{query}%", f"%{query}%")).fetchall()
-    else:
-        notes = db.execute("SELECT * FROM notes WHERE user_id=? ORDER BY pinned DESC, sort_order, updated_at DESC", (session["user_id"],)).fetchall()
+    text, filters = parse_search(query)
+    clauses = ["n.user_id=?", "n.deleted_at IS NULL"]
+    params = [session["user_id"]]
+    if text:
+        like = f"%{text}%"
+        clauses.append("(n.title LIKE ? OR (n.encrypted=0 AND n.body LIKE ?) OR EXISTS (SELECT 1 FROM attachments a WHERE a.note_id=n.id AND a.original_name LIKE ?))")
+        params.extend([like, like, like])
+    for value in filters.get("is", []):
+        if value == "encrypted": clauses.append("n.encrypted=1")
+        elif value == "pinned": clauses.append("n.pinned=1")
+        elif value == "file": clauses.append("EXISTS (SELECT 1 FROM attachments a WHERE a.note_id=n.id)")
+    for mood in filters.get("mood", []):
+        clauses.append("n.mood=?"); params.append(mood)
+    for before in filters.get("before", []):
+        clauses.append("substr(n.updated_at,1,10) < ?"); params.append(before)
+    for after in filters.get("after", []):
+        clauses.append("substr(n.updated_at,1,10) > ?"); params.append(after)
+    for tag in filters.get("tag", []):
+        clauses.append("EXISTS (SELECT 1 FROM note_tags nt JOIN tags t ON t.id=nt.tag_id WHERE nt.note_id=n.id AND t.user_id=? AND t.normalized_name=?)")
+        params.extend([session["user_id"], tag])
+    notes = db.execute("SELECT n.* FROM notes n WHERE " + " AND ".join(clauses) + " ORDER BY n.pinned DESC, n.sort_order, n.updated_at DESC", params).fetchall()
+    note_data = {row["id"]: note_tags(row["id"]) for row in notes}
+    tags = db.execute("SELECT * FROM tags WHERE user_id=? ORDER BY name", (session["user_id"],)).fetchall()
     today = date.today().isoformat()
-    daily = db.execute("SELECT * FROM notes WHERE user_id=? AND daily_date=?", (session["user_id"], today)).fetchone()
-    active_days = {row[0] for row in db.execute("SELECT DISTINCT substr(created_at,1,10) FROM notes WHERE user_id=?", (session["user_id"],)).fetchall()}
+    daily = db.execute("SELECT * FROM notes WHERE user_id=? AND daily_date=? AND deleted_at IS NULL", (session["user_id"], today)).fetchone()
+    active_days = {row[0] for row in db.execute("SELECT DISTINCT substr(created_at,1,10) FROM notes WHERE user_id=? AND deleted_at IS NULL", (session["user_id"],)).fetchall()}
     streak = 0
     cursor = date.today()
     while cursor.isoformat() in active_days:
         streak += 1
         cursor -= timedelta(days=1)
-    return render_template("dashboard.html", notes=notes, query=query, reminders=session.pop("login_reminders", []), daily=daily, streak=streak)
+    return render_template("dashboard.html", notes=notes, query=query, search_text=text, filters=filters, tags=tags, note_tags=note_data, reminders=session.pop("login_reminders", []), daily=daily, streak=streak)
 
 
 @app.route("/notes/new", methods=["GET", "POST"])
@@ -238,13 +364,13 @@ def dashboard():
 def new_note():
     if request.method == "POST":
         return save_note()
-    return render_template("editor.html", note=None, attachments=[], unlocked=True, key=None, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
+    return render_template("editor.html", note=None, attachments=[], tags=[], unlocked=True, key=None, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
 
 
 @app.post("/notes/quick")
 @login_required
 def quick_note():
-    body = request.form.get("body", "").strip()
+    body = rich_text(request.form.get("body", "")).strip()
     if not body:
         flash("Tulis sedikit dulu, Darling.", "error")
         return redirect(url_for("dashboard"))
@@ -260,7 +386,7 @@ def quick_note():
 @app.post("/notes/daily")
 @login_required
 def daily_thought():
-    body = request.form.get("body", "").strip()
+    body = rich_text(request.form.get("body", "")).strip()
     if not body:
         return redirect(url_for("dashboard"))
     today = date.today().isoformat()
@@ -298,7 +424,7 @@ def reorder_notes():
 @app.route("/notes/random")
 @login_required
 def random_note():
-    note = connect_db().execute("SELECT id FROM notes WHERE user_id=? ORDER BY RANDOM() LIMIT 1", (session["user_id"],)).fetchone()
+    note = connect_db().execute("SELECT id FROM notes WHERE user_id=? AND deleted_at IS NULL ORDER BY RANDOM() LIMIT 1", (session["user_id"],)).fetchone()
     if not note:
         flash("Belum ada kenangan untuk diacak—buat catatan pertamamu dulu.", "error")
         return redirect(url_for("dashboard"))
@@ -307,7 +433,9 @@ def random_note():
 
 def save_note(note=None, key=None):
     title = request.form.get("title", "").strip()[:160] or "Catatan tanpa judul"
-    body = request.form.get("body", "")
+    body = sanitize_rich_html(request.form.get("body", ""))
+    if not rich_text(body):
+        body = "<p></p>"
     encrypted = request.form.get("encrypted") == "yes" or bool(note and note["encrypted"])
     password = request.form.get("note_password", "")
     if note and note["encrypted"] and not key:
@@ -315,7 +443,7 @@ def save_note(note=None, key=None):
     if encrypted and not key:
         if len(password) < 8:
             flash("Kata sandi catatan minimal 8 karakter.", "error")
-            return render_template("editor.html", note=note, attachments=attachment_rows(note["id"]) if note else [], unlocked=True, key=None)
+            return render_template("editor.html", note=note, attachments=attachment_rows(note["id"]) if note else [], tags=note_tags(note["id"]) if note else [], unlocked=True, key=None)
         salt = secrets.token_bytes(16)
         key = derive_key(password, salt)
     else:
@@ -339,6 +467,7 @@ def save_note(note=None, key=None):
         cur = db.execute("INSERT INTO notes(user_id,title,body,encrypted,salt,reminder_date,mood,daily_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                          (session["user_id"], title, stored_body, int(encrypted), base64.urlsafe_b64encode(salt).decode() if encrypted else None, reminder, mood, daily_date, timestamp, timestamp))
         note_id = cur.lastrowid
+    sync_tags(db, note_id, request.form.get("tags", ""))
     db.commit()
     for uploaded in request.files.getlist("files"):
         if not uploaded.filename:
@@ -402,7 +531,7 @@ def view_note(note_id):
     key = require_unlocked(note)
     if note["encrypted"] and key:
         return redirect(url_for("edit_note", note_id=note_id))
-    return render_template("note.html", note=note, body="", unlocked=False, attachments=attachment_rows(note_id))
+    return render_template("note.html", note=note, body="", body_html="", unlocked=False, attachments=attachment_rows(note_id))
 
 
 @app.route("/notes/<int:note_id>/edit", methods=["GET", "POST"])
@@ -420,8 +549,8 @@ def edit_note(note_id):
         blob = base64.urlsafe_b64decode(body[4:])
         body = open_sealed(blob[12:], blob[:12], key).decode()
     editable = dict(note)
-    editable["body"] = body
-    return render_template("editor.html", note=editable, attachments=attachment_rows(note_id), unlocked=True, key=key, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
+    editable["body"] = display_rich_html(body)
+    return render_template("editor.html", note=editable, attachments=attachment_rows(note_id), tags=note_tags(note_id), unlocked=True, key=key, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
 
 
 @app.post("/notes/<int:note_id>/mood")
@@ -440,16 +569,79 @@ def update_mood(note_id):
 @login_required
 def delete_note(note_id):
     note = user_note(note_id)
-    for attachment in attachment_rows(note_id):
-        try:
-            Path(app.config["UPLOAD_FOLDER"], attachment["stored_name"]).unlink(missing_ok=True)
-        except OSError:
-            pass
     with connect_db() as db:
-        db.execute("DELETE FROM notes WHERE id=? AND user_id=?", (note_id, session["user_id"]))
+        db.execute("UPDATE notes SET deleted_at=?,updated_at=? WHERE id=? AND user_id=?", (now_text(), now_text(), note_id, session["user_id"]))
     session.get("unlocked", {}).pop(str(note_id), None)
-    flash("Catatan dihapus.", "success")
+    flash("Catatan dipindahkan ke Trash. Kamu masih bisa memulihkannya.", "success")
     return redirect(url_for("dashboard"))
+
+
+@app.route("/trash")
+@login_required
+def trash():
+    db = connect_db()
+    notes = db.execute("SELECT n.*, COUNT(a.id) AS attachment_count FROM notes n LEFT JOIN attachments a ON a.note_id=n.id WHERE n.user_id=? AND n.deleted_at IS NOT NULL GROUP BY n.id ORDER BY n.deleted_at DESC", (session["user_id"],)).fetchall()
+    return render_template("trash.html", notes=notes)
+
+
+@app.post("/trash/<int:note_id>/restore")
+@login_required
+def restore_note(note_id):
+    with connect_db() as db:
+        changed = db.execute("UPDATE notes SET deleted_at=NULL,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NOT NULL", (now_text(), note_id, session["user_id"])).rowcount
+    if not changed:
+        abort(404)
+    flash("Catatan dipulihkan ke vault.", "success")
+    return redirect(url_for("trash"))
+
+
+def permanently_delete(note_id):
+    db = connect_db()
+    attachments = db.execute("SELECT stored_name FROM attachments WHERE note_id=? AND user_id=?", (note_id, session["user_id"])).fetchall()
+    for attachment in attachments:
+        Path(app.config["UPLOAD_FOLDER"], attachment["stored_name"]).unlink(missing_ok=True)
+    db.execute("DELETE FROM notes WHERE id=? AND user_id=? AND deleted_at IS NOT NULL", (note_id, session["user_id"]))
+    db.commit()
+
+
+@app.post("/trash/<int:note_id>/delete")
+@login_required
+def permanently_delete_note(note_id):
+    permanently_delete(note_id)
+    flash("Catatan dan lampirannya dihapus permanen.", "success")
+    return redirect(url_for("trash"))
+
+
+@app.post("/trash/empty")
+@login_required
+def empty_trash():
+    ids = connect_db().execute("SELECT id FROM notes WHERE user_id=? AND deleted_at IS NOT NULL", (session["user_id"],)).fetchall()
+    for item in ids:
+        permanently_delete(item["id"])
+    flash("Trash sudah dikosongkan.", "success")
+    return redirect(url_for("trash"))
+
+
+@app.route("/settings", methods=["GET", "POST"])
+@login_required
+def settings():
+    db = connect_db()
+    if request.method == "POST":
+        with db:
+            db.execute("INSERT INTO user_settings(user_id,reduced_motion,ambient,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET reduced_motion=excluded.reduced_motion,ambient=excluded.ambient,updated_at=excluded.updated_at", (session["user_id"], int(request.form.get("reduced_motion") == "yes"), int(request.form.get("ambient") == "yes"), now_text()))
+        flash("Preferensi disimpan.", "success")
+        return redirect(url_for("settings"))
+    preferences = db.execute("SELECT * FROM user_settings WHERE user_id=?", (session["user_id"],)).fetchone()
+    user = db.execute("SELECT username,created_at FROM users WHERE id=?", (session["user_id"],)).fetchone()
+    return render_template("settings.html", preferences=preferences, user=user)
+
+
+@app.post("/lock")
+@login_required
+def lock_vault():
+    session.clear()
+    flash("Vault dikunci. Silakan masuk kembali untuk melanjutkan.", "success")
+    return redirect(url_for("login"))
 
 
 @app.post("/attachments/<int:attachment_id>/delete")

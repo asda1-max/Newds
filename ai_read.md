@@ -84,3 +84,233 @@ NEWDS is a personal notes vault: a notes-first web app for capturing text, links
 - This is a personal development deployment; uploaded files are kept on the same machine in a private backend storage directory.
 - The file-size limits are per file and strict: 1 GB is the maximum for non-image files; image files have the stricter 10 MB maximum.
 - Encryption is application-level authenticated encryption for both note text and attachments.
+
+---
+
+# NEWDS — Long-Term All-in-One Roadmap
+
+The following phases describe the planned evolution of NEWDS from a polished personal notes vault into an all-in-one private personal operating system. Each phase should be implemented incrementally and verified before moving to the next phase.
+
+## Current feature baseline
+
+Already implemented in the current build:
+- Flask, SQLite, bcrypt login, CSRF protection, and a five-account registration cap.
+- Notes with text, links, multiple backend-stored attachments, image previews, and downloads.
+- Password-based authenticated encryption for encrypted note bodies and attachments.
+- Login-time H-3, H-2, H-1 reminders.
+- Rose-gold/violet responsive interface with editor wipe transitions.
+- Direct editing for ordinary notes; encrypted notes go through an unlock page first.
+- Mood themes: Lavender Haze, Rose Latte, Midnight, and Sunday Paper.
+- Pinned notes, drag-to-reorder cards, daily thought, quick capture, random memory, focus mode, ambient visual mode, journaling streak, unlock reveal, and attachment lightbox.
+
+## Phase 1 — Daily-use foundations
+
+### 1. Universal search and filters
+- Search note titles, ordinary note bodies, attachment display names, tags, moods, and reminder dates.
+- Keep encrypted note contents excluded from plaintext search unless the note is unlocked in the current session.
+- Add filter chips and query operators:
+  - `is:encrypted`
+  - `is:pinned`
+  - `has:file`
+  - `mood:rose`
+  - `before:YYYY-MM-DD`
+  - `after:YYYY-MM-DD`
+- Show result counts, active filters, and a clear-all control.
+- Add indexes for fields used by common searches.
+
+### 2. Tags and collections
+- Add a reusable tags table and a note-to-tags join table.
+- Allow multiple tags per note, with safe normalized names.
+- Provide tag suggestions based on existing tags.
+- Add dashboard collections:
+  - All Notes
+  - Pinned
+  - Encrypted
+  - With Attachments
+  - Reminders
+  - Daily Thoughts
+  - Custom tags
+- Keep mood and tags separate: mood controls atmosphere, tags control organization.
+
+### 3. Trash and restore
+- Replace immediate permanent deletion with a trash state.
+- Add a Trash page with restore and permanent-delete actions.
+- Add an Empty Trash confirmation flow.
+- Keep deleted notes and attachment references recoverable until permanent deletion.
+- Add optional automatic cleanup after 30 days.
+- Ensure encrypted files remain encrypted while in Trash.
+
+### 4. Backup, export, and import
+- Export one note as Markdown and HTML.
+- Export selected notes or the complete vault as a ZIP.
+- Include attachments and a manifest containing note metadata.
+- Create an encrypted full-vault backup protected by a separate backup password.
+- Provide an import flow with validation, duplicate handling, and a preview before committing.
+- Add a backup health indicator and last-backup timestamp in Settings.
+- Never include login passwords or encryption passwords in plaintext exports.
+
+### 5. Checklist and task mode
+- Add checklist blocks inside notes.
+- Support checked/unchecked items, ordering, and quick completion toggles.
+- Add optional due dates and priority labels for checklist items.
+- Provide a lightweight Tasks view without turning NEWDS into a complex project-management tool.
+- Allow converting a checklist item into a separate note.
+
+### 6. Settings and vault lock
+- Create a Settings page for account, appearance, storage, animation, and privacy preferences.
+- Add a manual Lock Vault button.
+- Add optional inactivity auto-lock.
+- Support a local PIN or re-authentication gate for returning to an unlocked session.
+- Add a reduced-motion preference and ambient-mode preference.
+- Add account password change with current-password verification.
+
+## Phase 2 — Journaling and time-based memory
+
+### 7. Journal mode
+- Add a dedicated Journal entry type with an automatic date.
+- Make encryption the default for journal entries, while allowing the user to change it.
+- Support mood, energy level, reflection prompts, and optional attachments.
+- Add prompts such as:
+  - What is occupying your mind today?
+  - What went well today?
+  - What do you want to let go of?
+  - What should your future self remember?
+- Keep journal entries compatible with universal search and export.
+
+### 8. Calendar and timeline views
+- Add a monthly calendar showing notes, daily thoughts, journal entries, and reminders.
+- Add a chronological timeline view for recent activity.
+- Clicking a date should show all entries from that date.
+- Support keyboard navigation and responsive mobile calendar behavior.
+
+### 9. On This Day
+- Find entries created on the same month/day in previous years.
+- Show an optional login-time card: “On this day…”
+- Respect encryption: locked notes show only safe metadata until unlocked.
+- Allow dismissing the card for the current session.
+
+### 10. Templates
+- Add templates for:
+  - Daily journal
+  - Brain dump
+  - Meeting notes
+  - Book notes
+  - Movie notes
+  - Travel plan
+  - Shopping list
+  - Finance log
+  - Idea canvas
+  - Letter to future self
+- Let users create and save custom templates.
+- Keep template selection available from Quick Capture and the new-note flow.
+
+### 11. Mood analytics
+- Show simple, non-clinical visual summaries by week and month.
+- Display mood counts, journaling frequency, and note creation patterns.
+- Use language of reflection rather than diagnosis.
+- Never infer mental-health conditions from mood data.
+
+## Phase 3 — Distinctive NEWDS identity
+
+### 12. Rich text editor
+- Replace the basic textarea with a progressively enhanced editor.
+- Support bold, italic, headings, quote blocks, bullet lists, numbered lists, checklists, code blocks, dividers, highlights, and links.
+- Preserve a safe plain-text or structured representation for encryption and export.
+- Keep keyboard shortcuts and mobile editing comfortable.
+- Add autosave drafts only after encrypted draft handling is designed safely.
+
+### 13. Link capture and bookmarks
+- Detect pasted URLs and offer a link card.
+- Store URL, title, domain, description, and optional thumbnail metadata.
+- Add a Bookmarks collection and filters for domains.
+- Fetch remote metadata server-side with timeouts and safe URL validation.
+- Never allow remote metadata fetching to access internal/private network addresses.
+
+### 14. Web clipper
+- Create a small bookmarklet first.
+- Accept a URL, page title, selected text, and optional source metadata.
+- Add an authenticated capture endpoint with CSRF/token protection.
+- Consider a browser extension only after the bookmarklet flow is stable.
+
+### 15. Ambient rooms
+- Expand ambient mode into selectable rooms:
+  - Rainy Room
+  - Late-night Desk
+  - Soft Café
+  - Violet Silence
+  - Rose Morning
+- Change background gradients, subtle animations, and optional soundscape.
+- Audio must default to off and require an explicit user action.
+- Remember the selected room locally without storing unnecessary personal data.
+
+### 16. Memory constellation
+- Visualize notes as a constellation of interactive points.
+- Color points by mood and group them by shared tags.
+- Size points by attachment count, note length, or recency.
+- Clicking a point opens the appropriate editor or unlock page.
+- Keep a list-based fallback for accessibility and reduced-motion users.
+
+### 17. Easter eggs and quiet delight
+- Add time-aware greetings without becoming intrusive.
+- Add gentle milestones such as the tenth note or first week of journaling.
+- Create rotating captions for Random Memory.
+- Add an optional Midnight Mode based on local time.
+- Keep all easter eggs reversible and avoid interrupting writing.
+
+## Phase 4 — Advanced personal vault capabilities
+
+### 18. OCR and document intelligence
+- Extract text from supported images and PDFs locally where possible.
+- Make OCR opt-in for privacy.
+- Store extracted text separately and protect it under the same encryption rules as the source note.
+- Allow searching OCR text only after explicit indexing consent.
+
+### 19. Secure snippets
+- Add a dedicated encrypted content type for recovery codes, API keys, license keys, Wi-Fi notes, and other short secrets.
+- Hide content by default and require deliberate reveal.
+- Add copy-to-clipboard with temporary confirmation and automatic clearing where practical.
+- Do not market this as a full password manager until it has undergone a dedicated security review.
+
+### 20. Activity and audit history
+- Record useful local activity such as login, note creation, note deletion, attachment upload, restore, and backup creation.
+- Add an Activity page with timestamps and safe descriptions.
+- Never log note contents, passwords, encryption keys, or sensitive attachment data.
+
+### 21. Optional local AI assistant
+- Consider an opt-in, local-first assistant for:
+  - Summarizing a selected note
+  - Extracting action items
+  - Suggesting tags
+  - Finding related notes
+  - Generating journal prompts
+- Keep AI actions explicitly user-triggered.
+- Do not send private content to external services by default.
+- Clearly show which note content is being processed.
+
+## Recommended implementation order
+
+1. Universal search and filters.
+2. Tags and collections.
+3. Trash and restore.
+4. Encrypted backup/export/import.
+5. Checklist and task mode.
+6. Settings and vault lock.
+7. Journal mode and calendar view.
+8. On This Day and templates.
+9. Mood analytics.
+10. Rich text editor.
+11. Link capture and web clipper.
+12. Ambient rooms and memory constellation.
+13. OCR, secure snippets, audit history, and optional local AI.
+
+## Definition of done for the roadmap
+
+Every phase is complete only when:
+- The feature has an intentional responsive UI.
+- Ownership and authorization checks cover every route.
+- Encrypted content does not leak through search, previews, logs, exports, or metadata.
+- Destructive actions have a recovery path where appropriate.
+- Database migrations work against an existing NEWDS installation.
+- Keyboard, mobile, reduced-motion, and empty/error states are handled.
+- Relevant smoke tests and round-trip tests pass.
+- The feature is documented in the README and this file.
