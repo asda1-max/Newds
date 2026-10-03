@@ -1,6 +1,7 @@
 import base64
 import json
 import ipaddress
+import hashlib
 import os
 import re
 import secrets
@@ -24,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MAX_FILE_BYTES = 1024 ** 3
 MAX_IMAGE_BYTES = 10 * 1024 ** 2
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
-BLOCKED_EXTENSIONS = {"py", "pyc", "exe", "dll", "bat", "cmd", "ps1", "sh", "php", "js", "html", "htm", "com", "msi"}
+ESCROW_EXTENSIONS = {"py", "pyc", "exe", "dll", "bat", "cmd", "ps1", "sh", "php", "js", "html", "htm", "com", "msi"}
 
 app = Flask(__name__, instance_relative_config=True)
 app.config.update(
@@ -34,6 +35,7 @@ app.config.update(
     MAX_CONTENT_LENGTH=2 * MAX_FILE_BYTES,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("NEWDS_COOKIE_SECURE", "0") == "1",
 )
 Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
@@ -117,6 +119,23 @@ def now_text():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def safe_local_redirect(fallback):
+    target = request.referrer
+    if target:
+        parsed = urlparse(target)
+        if parsed.scheme in {"", "http", "https"} and parsed.netloc in {"", request.host}:
+            return target
+    return url_for(fallback)
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 def log_activity(action, object_type="vault"):
     if not session.get("user_id"):
         return
@@ -132,9 +151,17 @@ class RichHTMLSanitizer(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.out = []
+        self._discard_tags = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
+        if self._discard_tags:
+            if tag not in {"br", "hr", "input", "img"}:
+                self._discard_tags.append(tag)
+            return
+        if tag in {"script", "style", "iframe", "object", "embed", "template"}:
+            self._discard_tags.append(tag)
+            return
         if tag not in RICH_TAGS:
             return
         safe = []
@@ -153,14 +180,22 @@ class RichHTMLSanitizer(HTMLParser):
         self.out.append("<" + tag + (" " + " ".join(safe) if safe else "") + ">")
 
     def handle_startendtag(self, tag, attrs):
+        if self._discard_tags:
+            return
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        if tag.lower() in RICH_TAGS and tag.lower() not in {"br", "hr", "input"}:
-            self.out.append(f"</{tag.lower()}>")
+        tag = tag.lower()
+        if self._discard_tags:
+            if tag in self._discard_tags:
+                self._discard_tags.pop()
+            return
+        if tag in RICH_TAGS and tag not in {"br", "hr", "input"}:
+            self.out.append(f"</{tag}>")
 
     def handle_data(self, data):
-        self.out.append(escape(data))
+        if not self._discard_tags:
+            self.out.append(escape(data))
 
 
 def sanitize_rich_html(value):
@@ -212,6 +247,20 @@ def seal(data, key):
 
 def open_sealed(data, nonce, key):
     return AESGCM(key).decrypt(nonce, data, None)
+
+
+def escrow_key():
+    secret = os.environ.get("NEWDS_SECRET", "dev-only-change-this-secret")
+    return hashlib.sha256(("newds-escrow-v1:" + secret).encode("utf-8")).digest()
+
+
+def is_escrow_extension(filename):
+    return Path(filename).suffix.lower().lstrip(".") in ESCROW_EXTENSIONS
+
+
+def escrow_download_name(filename):
+    suffix = ".NEWDS"
+    return filename if filename.lower().endswith(suffix.lower()) else filename + suffix
 
 
 def unlocked_key(note):
@@ -299,6 +348,9 @@ def register():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         db = connect_db()
+        # Serialize the quota check with the insert so concurrent requests
+        # cannot create more than the five-account limit.
+        db.execute("BEGIN IMMEDIATE")
         count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count >= 5:
             flash("Pendaftaran ditutup: NEWDS saat ini dibatasi untuk lima akun.", "error")
@@ -314,7 +366,10 @@ def register():
                 flash("Akun berhasil dibuat. Silakan masuk.", "success")
                 return redirect(url_for("login"))
             except sqlite3.IntegrityError:
+                db.rollback()
                 flash("Nama pengguna tersebut sudah digunakan.", "error")
+        if db.in_transaction:
+            db.rollback()
     return render_template("auth.html", mode="register")
 
 
@@ -439,7 +494,7 @@ def toggle_pin(note_id):
     note = user_note(note_id)
     with connect_db() as db:
         db.execute("UPDATE notes SET pinned=? WHERE id=? AND user_id=?", (0 if note["pinned"] else 1, note_id, session["user_id"]))
-    return redirect(request.referrer or url_for("dashboard"))
+    return redirect(safe_local_redirect("dashboard"))
 
 
 @app.post("/notes/reorder")
@@ -513,9 +568,7 @@ def save_note(note=None, key=None):
             continue
         original = secure_filename(uploaded.filename) or "attachment"
         ext = original.rsplit(".", 1)[-1].lower() if "." in original else ""
-        if ext in BLOCKED_EXTENSIONS:
-            flash(f"Tipe berkas {ext} tidak diizinkan.", "error")
-            continue
+        escrowed = ext in ESCROW_EXTENSIONS and not encrypted
         raw = uploaded.read(MAX_FILE_BYTES + 1)
         if len(raw) >= MAX_FILE_BYTES:
             flash(f"{original}: berkas harus lebih kecil dari 1 GB.", "error")
@@ -529,10 +582,12 @@ def save_note(note=None, key=None):
         nonce = None
         if encrypted:
             nonce, raw = seal(raw, key)
-        stored = uuid.uuid4().hex + (".vault" if encrypted else ".blob")
+        elif escrowed:
+            nonce, raw = seal(raw, escrow_key())
+        stored = uuid.uuid4().hex + (".vault" if encrypted else ".newds" if escrowed else ".blob")
         Path(app.config["UPLOAD_FOLDER"], stored).write_bytes(raw)
         db.execute("INSERT INTO attachments(note_id,user_id,stored_name,original_name,mime_type,size,encrypted,nonce,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                   (note_id, session["user_id"], stored, original, mime, original_size, int(encrypted), base64.urlsafe_b64encode(nonce).decode() if nonce else None, now_text()))
+                   (note_id, session["user_id"], stored, original, mime, original_size, 1 if encrypted else 2 if escrowed else 0, base64.urlsafe_b64encode(nonce).decode() if nonce else None, now_text()))
     db.commit()
     if encrypted:
         unlocked = session.get("unlocked", {})
@@ -938,7 +993,7 @@ def delete_attachment(attachment_id):
     if not item:
         abort(404)
     note = user_note(item["note_id"])
-    if item["encrypted"] and not require_unlocked(note):
+    if note["encrypted"] and not require_unlocked(note):
         abort(403)
     Path(app.config["UPLOAD_FOLDER"], item["stored_name"]).unlink(missing_ok=True)
     db.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
@@ -955,21 +1010,40 @@ def get_attachment(attachment_id):
         abort(404)
     note = user_note(item["note_id"])
     path = Path(app.config["UPLOAD_FOLDER"], item["stored_name"])
-    if item["encrypted"]:
+    if note["encrypted"] and not require_unlocked(note):
+        abort(403)
+    extension_is_escrow = is_escrow_extension(item["original_name"])
+    if item["encrypted"] == 2:
+        from io import BytesIO
+        nonce = base64.urlsafe_b64decode(item["nonce"])
+        data = open_sealed(path.read_bytes(), nonce, escrow_key())
+        response = send_file(BytesIO(data), mimetype="application/octet-stream", as_attachment=True,
+                             download_name=item["original_name"], max_age=0)
+    elif item["encrypted"] == 1 and extension_is_escrow:
+        nonce = base64.urlsafe_b64decode(item["nonce"])
+        original_data = open_sealed(path.read_bytes(), nonce, require_unlocked(note))
+        from io import BytesIO
+        response = send_file(BytesIO(original_data), mimetype="application/octet-stream",
+                             as_attachment=True, download_name=item["original_name"], max_age=0)
+    elif item["encrypted"] == 1:
         key = require_unlocked(note)
         if not key:
             abort(403)
         nonce = base64.urlsafe_b64decode(item["nonce"])
         data = open_sealed(path.read_bytes(), nonce, key)
         from io import BytesIO
-        return send_file(BytesIO(data), mimetype=item["mime_type"], as_attachment=request.args.get("download") == "1" or not item["mime_type"].startswith("image/"), download_name=item["original_name"], max_age=0)
-    return send_file(path, mimetype=item["mime_type"], as_attachment=request.args.get("download") == "1" or not item["mime_type"].startswith("image/"), download_name=item["original_name"], max_age=0)
+        response = send_file(BytesIO(data), mimetype=item["mime_type"], as_attachment=request.args.get("download") == "1" or not item["mime_type"].startswith("image/"), download_name=item["original_name"], max_age=0)
+    else:
+        inline_image = Path(item["original_name"]).suffix.lower().lstrip(".") in IMAGE_EXTENSIONS
+        response = send_file(path, mimetype=item["mime_type"] if inline_image else "application/octet-stream", as_attachment=request.args.get("download") == "1" or not inline_image, download_name=item["original_name"], max_age=0)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.errorhandler(413)
 def too_large(_error):
     flash("Ukuran total unggahan terlalu besar untuk satu permintaan.", "error")
-    return redirect(request.referrer or url_for("dashboard"))
+    return redirect(safe_local_redirect("dashboard"))
 
 
 if __name__ == "__main__":

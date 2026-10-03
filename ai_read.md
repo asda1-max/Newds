@@ -45,8 +45,8 @@ NEWDS is a personal notes vault: a notes-first web app for capturing text, links
 - Every file must be strictly smaller than 1 GB (1,073,741,824 bytes).
 - Images must be strictly smaller than 10 MB (10,485,760 bytes); the image-specific limit applies even though the general file limit is larger.
 - Enforce limits while receiving uploads as well as validating the resulting file size. Configure Flask request limits to allow a note plus multiple permitted files without accepting an unbounded request.
-- Permit common image, document, and archive types while allowing other non-executable user files subject to the size cap; reject unsafe executable/server-interpreted formats.
-- Never serve an upload as executable content. Serve owned downloads as attachments and image previews with a validated image MIME type.
+- Permit common image, document, and archive types while allowing other user files subject to the size cap. Unsafe executable/server-interpreted formats must be encrypted at rest as escrow files and downloaded only with a `.NEWDS` suffix.
+- Never serve an upload as executable content. Decrypt escrow files only for an authenticated owner's explicit download, serve them as `application/octet-stream` attachments under the original filename, and allow inline image previews only for validated raster image extensions.
 
 ### 6. Encrypted notes and attachments
 - At note creation, allow the user to select ordinary or password-encrypted mode.
