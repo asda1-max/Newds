@@ -1,4 +1,6 @@
 import base64
+import json
+import ipaddress
 import os
 import re
 import secrets
@@ -57,7 +59,7 @@ def init_db():
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', encrypted INTEGER NOT NULL DEFAULT 0,
           salt TEXT, reminder_date TEXT, mood TEXT NOT NULL DEFAULT 'lavender', pinned INTEGER NOT NULL DEFAULT 0,
-           sort_order INTEGER NOT NULL DEFAULT 0, daily_date TEXT, deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+           sort_order INTEGER NOT NULL DEFAULT 0, daily_date TEXT, deleted_at TEXT, note_type TEXT NOT NULL DEFAULT 'note', energy INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS attachments (
           id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -86,10 +88,24 @@ def init_db():
           reduced_motion INTEGER NOT NULL DEFAULT 0, ambient INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS templates (
+          id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL, body TEXT NOT NULL, mood TEXT NOT NULL DEFAULT 'lavender', created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS secure_snippets (
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          label TEXT NOT NULL, salt TEXT NOT NULL, nonce TEXT NOT NULL, ciphertext TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS activity_log (
+          id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          action TEXT NOT NULL, object_type TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS activity_owner_time ON activity_log(user_id,created_at DESC);
         """)
         # Lightweight migration for databases created by previous NEWDS builds.
         columns = {row["name"] for row in db.execute("PRAGMA table_info(notes)")}
-        for name, definition in (("mood", "TEXT NOT NULL DEFAULT 'lavender'"), ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("sort_order", "INTEGER NOT NULL DEFAULT 0"), ("daily_date", "TEXT"), ("deleted_at", "TEXT")):
+        for name, definition in (("mood", "TEXT NOT NULL DEFAULT 'lavender'"), ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("sort_order", "INTEGER NOT NULL DEFAULT 0"), ("daily_date", "TEXT"), ("deleted_at", "TEXT"), ("note_type", "TEXT NOT NULL DEFAULT 'note'"), ("energy", "INTEGER")):
             if name not in columns:
                 db.execute(f"ALTER TABLE notes ADD COLUMN {name} {definition}")
 
@@ -99,6 +115,13 @@ init_db()
 
 def now_text():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def log_activity(action, object_type="vault"):
+    if not session.get("user_id"):
+        return
+    with connect_db() as db:
+        db.execute("INSERT INTO activity_log(user_id,action,object_type,created_at) VALUES(?,?,?,?)", (session["user_id"], action[:40], object_type[:40], now_text()))
 
 
 RICH_TAGS = {"p", "br", "strong", "b", "em", "i", "u", "s", "mark", "h2", "h3", "blockquote", "ul", "ol", "li", "pre", "code", "hr", "a", "input"}
@@ -308,6 +331,7 @@ def login():
             session["username"] = user["username"]
             session["unlocked"] = {}
             session["login_reminders"] = reminders_for_login(user["id"])
+            log_activity("login")
             return redirect(url_for("dashboard"))
         flash("Nama pengguna atau kata sandi tidak cocok.", "error")
     return render_template("auth.html", mode="login")
@@ -316,6 +340,7 @@ def login():
 @app.post("/logout")
 @login_required
 def logout():
+    log_activity("logout")
     session.clear()
     return redirect(url_for("login"))
 
@@ -364,7 +389,14 @@ def dashboard():
 def new_note():
     if request.method == "POST":
         return save_note()
-    return render_template("editor.html", note=None, attachments=[], tags=[], unlocked=True, key=None, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
+    requested_type = request.args.get("note_type", "note")
+    if requested_type in {"journal", "bookmark"}:
+        session["new_note_type"] = requested_type
+    template_id = request.args.get("template", type=int)
+    preset = None
+    if template_id:
+        preset = connect_db().execute("SELECT * FROM templates WHERE id=? AND (user_id IS NULL OR user_id=?)", (template_id, session["user_id"])).fetchone()
+    return render_template("editor.html", note=None, attachments=[], tags=[], preset=preset, note_type=requested_type, unlocked=True, key=None, note_count=connect_db().execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (session["user_id"],)).fetchone()[0])
 
 
 @app.post("/notes/quick")
@@ -457,18 +489,25 @@ def save_note(note=None, key=None):
     if mood not in {"lavender", "rose", "midnight", "paper"}:
         mood = "lavender"
     daily_date = date.today().isoformat() if request.form.get("daily_thought") == "yes" else (note["daily_date"] if note and "daily_date" in note.keys() else None)
+    note_type = request.form.get("note_type") or (note["note_type"] if note and "note_type" in note.keys() else session.pop("new_note_type", "note"))
+    if note_type not in {"note", "journal", "bookmark"}:
+        note_type = "note"
+    energy = request.form.get("energy", type=int)
+    if energy is not None and not 1 <= energy <= 10:
+        energy = None
     db = connect_db()
     timestamp = now_text()
     if note:
-        db.execute("UPDATE notes SET title=?,body=?,encrypted=?,salt=?,reminder_date=?,mood=?,daily_date=?,updated_at=? WHERE id=? AND user_id=?",
-                   (title, stored_body, int(encrypted), base64.urlsafe_b64encode(salt).decode() if encrypted else None, reminder, mood, daily_date, timestamp, note["id"], session["user_id"]))
+        db.execute("UPDATE notes SET title=?,body=?,encrypted=?,salt=?,reminder_date=?,mood=?,daily_date=?,note_type=?,energy=?,updated_at=? WHERE id=? AND user_id=?",
+                   (title, stored_body, int(encrypted), base64.urlsafe_b64encode(salt).decode() if encrypted else None, reminder, mood, daily_date, note_type, energy, timestamp, note["id"], session["user_id"]))
         note_id = note["id"]
     else:
-        cur = db.execute("INSERT INTO notes(user_id,title,body,encrypted,salt,reminder_date,mood,daily_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                         (session["user_id"], title, stored_body, int(encrypted), base64.urlsafe_b64encode(salt).decode() if encrypted else None, reminder, mood, daily_date, timestamp, timestamp))
+        cur = db.execute("INSERT INTO notes(user_id,title,body,encrypted,salt,reminder_date,mood,daily_date,note_type,energy,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (session["user_id"], title, stored_body, int(encrypted), base64.urlsafe_b64encode(salt).decode() if encrypted else None, reminder, mood, daily_date, note_type, energy, timestamp, timestamp))
         note_id = cur.lastrowid
     sync_tags(db, note_id, request.form.get("tags", ""))
     db.commit()
+    log_activity("note_saved", "note")
     for uploaded in request.files.getlist("files"):
         if not uploaded.filename:
             continue
@@ -571,6 +610,7 @@ def delete_note(note_id):
     note = user_note(note_id)
     with connect_db() as db:
         db.execute("UPDATE notes SET deleted_at=?,updated_at=? WHERE id=? AND user_id=?", (now_text(), now_text(), note_id, session["user_id"]))
+    log_activity("note_trashed", "note")
     session.get("unlocked", {}).pop(str(note_id), None)
     flash("Catatan dipindahkan ke Trash. Kamu masih bisa memulihkannya.", "success")
     return redirect(url_for("dashboard"))
@@ -591,6 +631,7 @@ def restore_note(note_id):
         changed = db.execute("UPDATE notes SET deleted_at=NULL,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NOT NULL", (now_text(), note_id, session["user_id"])).rowcount
     if not changed:
         abort(404)
+    log_activity("note_restored", "note")
     flash("Catatan dipulihkan ke vault.", "success")
     return redirect(url_for("trash"))
 
@@ -608,6 +649,7 @@ def permanently_delete(note_id):
 @login_required
 def permanently_delete_note(note_id):
     permanently_delete(note_id)
+    log_activity("note_permanently_deleted", "note")
     flash("Catatan dan lampirannya dihapus permanen.", "success")
     return redirect(url_for("trash"))
 
@@ -642,6 +684,250 @@ def lock_vault():
     session.clear()
     flash("Vault dikunci. Silakan masuk kembali untuk melanjutkan.", "success")
     return redirect(url_for("login"))
+
+
+BUILTIN_TEMPLATES = [
+    ("Daily Journal", "<h2>Hari ini</h2><p>Apa yang memenuhi pikiranku?</p><p>Apa yang berjalan baik?</p><p>Apa yang ingin kulepaskan?</p><p>Untuk diriku di masa depan:</p>", "rose"),
+    ("Brain Dump", "<h2>Yang ada di kepala</h2><ul><li><br></li></ul><h2>Langkah kecil berikutnya</h2><p><br></p>", "lavender"),
+    ("Meeting Notes", "<h2>Agenda</h2><ul><li><br></li></ul><h2>Keputusan</h2><p><br></p><h2>Action items</h2><ul><li><input type=\"checkbox\" disabled> </li></ul>", "paper"),
+    ("Book Notes", "<h2>Ringkasan</h2><p><br></p><h2>Kutipan favorit</h2><blockquote><br></blockquote><h2>Pikiran</h2><p><br></p>", "midnight"),
+    ("Idea Canvas", "<h2>Gagasan</h2><p><br></p><h2>Kenapa menarik?</h2><p><br></p><h2>Eksperimen pertama</h2><p><br></p>", "lavender"),
+]
+
+
+def ensure_builtin_templates(db):
+    for name, body, mood in BUILTIN_TEMPLATES:
+        db.execute("INSERT INTO templates(user_id,name,body,mood,created_at) SELECT NULL,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM templates WHERE user_id IS NULL AND name=?)", (name, body, mood, now_text(), name))
+    db.commit()
+
+
+@app.route("/journal/new", methods=["GET", "POST"])
+@login_required
+def new_journal():
+    session["new_note_type"] = "journal"
+    return redirect(url_for("new_note", note_type="journal"))
+
+
+@app.route("/journal")
+@login_required
+def journal_list():
+    entries = connect_db().execute("SELECT id,title,mood,energy,encrypted,created_at,updated_at FROM notes WHERE user_id=? AND note_type='journal' AND deleted_at IS NULL ORDER BY created_at DESC", (session["user_id"],)).fetchall()
+    return render_template("journal.html", entries=entries)
+
+
+@app.route("/calendar")
+@login_required
+def calendar():
+    db = connect_db()
+    month_text = request.args.get("month", date.today().strftime("%Y-%m"))
+    try:
+        month = datetime.strptime(month_text, "%Y-%m").date().replace(day=1)
+    except ValueError:
+        month = date.today().replace(day=1)
+    next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    rows = db.execute("SELECT id,title,created_at,updated_at,daily_date,reminder_date,mood,note_type,encrypted FROM notes WHERE user_id=? AND deleted_at IS NULL AND substr(created_at,1,7)=? ORDER BY created_at DESC", (session["user_id"], month.strftime("%Y-%m"))).fetchall()
+    return render_template("calendar.html", month=month, previous=month.replace(day=1)-timedelta(days=1), next_month=next_month, entries=rows)
+
+
+@app.route("/timeline")
+@login_required
+def timeline():
+    entries = connect_db().execute("SELECT id,title,created_at,updated_at,mood,note_type,encrypted FROM notes WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 100", (session["user_id"],)).fetchall()
+    return render_template("timeline.html", entries=entries)
+
+
+@app.route("/on-this-day")
+@login_required
+def on_this_day():
+    today = date.today()
+    rows = connect_db().execute("SELECT id,title,created_at,mood,note_type,encrypted FROM notes WHERE user_id=? AND deleted_at IS NULL AND substr(created_at,6,5)=? AND substr(created_at,1,4)<>? ORDER BY created_at DESC", (session["user_id"], today.strftime("%m-%d"), str(today.year))).fetchall()
+    return render_template("memory.html", entries=rows, title="On This Day", empty="Belum ada kenangan dari tanggal ini di tahun sebelumnya.")
+
+
+@app.route("/analytics")
+@login_required
+def analytics():
+    db = connect_db()
+    mood_rows = db.execute("SELECT mood,COUNT(*) AS total FROM notes WHERE user_id=? AND deleted_at IS NULL AND note_type='journal' GROUP BY mood ORDER BY total DESC", (session["user_id"],)).fetchall()
+    month_rows = db.execute("SELECT substr(created_at,1,7) AS month,COUNT(*) AS total FROM notes WHERE user_id=? AND deleted_at IS NULL GROUP BY month ORDER BY month DESC LIMIT 6", (session["user_id"],)).fetchall()
+    total = db.execute("SELECT COUNT(*) FROM notes WHERE user_id=? AND deleted_at IS NULL AND note_type='journal'", (session["user_id"],)).fetchone()[0]
+    return render_template("analytics.html", moods=mood_rows, months=month_rows, total=total)
+
+
+@app.route("/templates")
+@login_required
+def template_gallery():
+    db = connect_db()
+    ensure_builtin_templates(db)
+    templates = db.execute("SELECT * FROM templates WHERE user_id IS NULL OR user_id=? ORDER BY user_id DESC,name", (session["user_id"],)).fetchall()
+    return render_template("templates.html", templates=templates)
+
+
+@app.post("/templates/save")
+@login_required
+def save_template():
+    name = request.form.get("name", "").strip()[:60]
+    body = sanitize_rich_html(request.form.get("body", ""))[:10000]
+    if not name or not body:
+        abort(400)
+    with connect_db() as db:
+        db.execute("INSERT INTO templates(user_id,name,body,mood,created_at) VALUES(?,?,?,?,?)", (session["user_id"], name, body, "lavender", now_text()))
+    flash("Template pribadi disimpan.", "success")
+    return redirect(url_for("template_gallery"))
+
+
+@app.route("/constellation")
+@login_required
+def constellation():
+    rows = connect_db().execute("SELECT id,title,mood,note_type,encrypted,created_at FROM notes WHERE user_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 100", (session["user_id"],)).fetchall()
+    return render_template("constellation.html", entries=rows)
+
+
+@app.route("/bookmarks")
+@login_required
+def bookmarks():
+    entries = connect_db().execute("SELECT id,title,body,created_at FROM notes WHERE user_id=? AND deleted_at IS NULL AND note_type='bookmark' ORDER BY created_at DESC", (session["user_id"],)).fetchall()
+    return render_template("memory.html", entries=entries, title="Bookmarks", empty="Belum ada link yang disimpan.")
+
+
+@app.post("/bookmarks/capture")
+@login_required
+def capture_bookmark():
+    target = request.form.get("url", "").strip()
+    parsed = urlparse(target)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or len(target) > 2048:
+        flash("Masukkan URL http atau https yang valid.", "error")
+        return redirect(url_for("dashboard"))
+    title = request.form.get("title", "").strip()[:160] or parsed.netloc
+    timestamp = now_text()
+    with connect_db() as db:
+        cur = db.execute("INSERT INTO notes(user_id,title,body,note_type,mood,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (session["user_id"], title, f'<p><a href="{escape(target, quote=True)}">{escape(target)}</a></p>', "bookmark", "midnight", timestamp, timestamp))
+        sync_tags(db, cur.lastrowid, request.form.get("tags", ""))
+    log_activity("bookmark_saved", "bookmark")
+    flash("Bookmark tersimpan.", "success")
+    return redirect(url_for("bookmarks"))
+
+
+@app.route("/snippets", methods=["GET", "POST"])
+@login_required
+def snippets():
+    if request.method == "POST":
+        label = request.form.get("label", "").strip()[:80]
+        secret_value = request.form.get("secret", "")
+        password = request.form.get("snippet_password", "")
+        if not label or not secret_value or len(password) < 10:
+            flash("Isi label, rahasia, dan kata sandi minimal 10 karakter.", "error")
+            return redirect(url_for("snippets"))
+        salt = secrets.token_bytes(16)
+        key = derive_key(password, salt)
+        nonce, ciphertext = seal(secret_value.encode(), key)
+        with connect_db() as db:
+            db.execute("INSERT INTO secure_snippets(user_id,label,salt,nonce,ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (session["user_id"], label, base64.urlsafe_b64encode(salt).decode(), base64.urlsafe_b64encode(nonce).decode(), base64.urlsafe_b64encode(ciphertext).decode(), now_text(), now_text()))
+        log_activity("snippet_created", "snippet")
+        flash("Secure snippet disimpan dalam bentuk terenkripsi.", "success")
+        return redirect(url_for("snippets"))
+    rows = connect_db().execute("SELECT id,label,created_at,updated_at FROM secure_snippets WHERE user_id=? ORDER BY updated_at DESC", (session["user_id"],)).fetchall()
+    return render_template("snippets.html", snippets=rows)
+
+
+@app.post("/snippets/<int:snippet_id>/reveal")
+@login_required
+def reveal_snippet(snippet_id):
+    item = connect_db().execute("SELECT * FROM secure_snippets WHERE id=? AND user_id=?", (snippet_id, session["user_id"])).fetchone()
+    if not item:
+        abort(404)
+    try:
+        password = request.form.get("snippet_password", "")
+        key = derive_key(password, base64.urlsafe_b64decode(item["salt"]))
+        secret_value = open_sealed(base64.urlsafe_b64decode(item["ciphertext"]), base64.urlsafe_b64decode(item["nonce"]), key).decode()
+    except Exception:
+        flash("Kata sandi salah atau snippet tidak dapat dibuka.", "error")
+        return redirect(url_for("snippets"))
+    return render_template("snippet_reveal.html", label=item["label"], secret_value=secret_value)
+
+
+@app.post("/snippets/<int:snippet_id>/delete")
+@login_required
+def delete_snippet(snippet_id):
+    with connect_db() as db:
+        deleted = db.execute("DELETE FROM secure_snippets WHERE id=? AND user_id=?", (snippet_id, session["user_id"])).rowcount
+    if not deleted:
+        abort(404)
+    log_activity("snippet_deleted", "snippet")
+    return redirect(url_for("snippets"))
+
+
+@app.route("/activity")
+@login_required
+def activity():
+    rows = connect_db().execute("SELECT action,object_type,created_at FROM activity_log WHERE user_id=? ORDER BY created_at DESC LIMIT 200", (session["user_id"],)).fetchall()
+    return render_template("activity.html", events=rows)
+
+
+@app.route("/ocr", methods=["GET", "POST"])
+@login_required
+def ocr():
+    abort(404)
+    result = None
+    error = None
+    if request.method == "POST":
+        upload = request.files.get("image")
+        if not upload or not upload.filename or not (upload.mimetype or "").startswith("image/"):
+            error = "Pilih file gambar untuk diproses. Gambar tidak disimpan oleh OCR."
+        else:
+            try:
+                import pytesseract
+                from PIL import Image
+                from io import BytesIO
+                raw = upload.read(MAX_IMAGE_BYTES)
+                if len(raw) >= MAX_IMAGE_BYTES:
+                    raise ValueError("Image exceeds local OCR size limit")
+                result = pytesseract.image_to_string(Image.open(BytesIO(raw)))
+                log_activity("local_ocr_processed", "image")
+            except ValueError:
+                error = "Gambar OCR harus lebih kecil dari 10 MB."
+            except ImportError:
+                error = "OCR lokal belum tersedia. Pasang Pillow, pytesseract, dan Tesseract OCR lalu coba lagi."
+            except Exception:
+                error = "Gambar tidak dapat dibaca oleh OCR lokal."
+    return render_template("ocr.html", result=result, error=error)
+
+
+@app.route("/assistant", methods=["GET", "POST"])
+@login_required
+def local_assistant():
+    abort(404)
+    answer = None
+    error = None
+    if request.method == "POST":
+        prompt = request.form.get("prompt", "").strip()[:2000]
+        endpoint = os.environ.get("NEWDS_LOCAL_AI_URL", "").strip()
+        if not endpoint:
+            error = "Local AI belum dikonfigurasi. Atur NEWDS_LOCAL_AI_URL ke endpoint model lokal pilihanmu."
+        else:
+            from urllib.request import Request, urlopen
+            try:
+                parsed_endpoint = urlparse(endpoint)
+                if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.hostname:
+                    raise ValueError("Invalid endpoint")
+                host = parsed_endpoint.hostname.lower()
+                try:
+                    address = ipaddress.ip_address(host)
+                    if not address.is_loopback:
+                        raise ValueError("Endpoint must be local")
+                except ValueError as exc:
+                    if str(exc) == "Endpoint must be local":
+                        raise
+                    if host not in {"localhost"} and not host.endswith(".localhost"):
+                        raise ValueError("Endpoint must be local")
+                payload = json.dumps({"prompt": prompt}).encode()
+                req = Request(endpoint, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(req, timeout=30) as response:
+                    answer = json.loads(response.read(1024 * 1024).decode()).get("response", "")
+                log_activity("local_assistant_used", "assistant")
+            except Exception:
+                error = "Tidak dapat menghubungi endpoint AI lokal. Pastikan endpoint berjalan dan menerima JSON {prompt}."
+    return render_template("assistant.html", answer=answer, error=error)
 
 
 @app.post("/attachments/<int:attachment_id>/delete")
